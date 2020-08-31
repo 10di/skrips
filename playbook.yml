@@ -1,0 +1,158 @@
+---
+- hosts: all
+  become: yes
+
+  pre_tasks:
+    - name: Update apt cache if needed.
+      apt: update_cache=yes cache_valid_time=3600
+
+    - name: Create swap file
+      shell: fallocate -l 2G /swapfile
+      ignore_errors: true
+
+    - name: Change permission swap
+      shell: chmod 600 /swapfile
+      ignore_errors: true
+
+    - name: Enable swap file
+      shell: mkswap /swapfile
+      ignore_errors: true
+
+    - name: Verify swap
+      shell: swapon /swapfile
+      ignore_errors: true
+
+  handlers:
+    - name: restart apache
+      service: name=apache2 state=restarted
+
+  tasks:
+    - name: Add ondrej repository for later versions of PHP.
+      apt_repository: repo='ppa:ondrej/php' update_cache=yes
+
+    - name: "Install Apache, MySQL, PHP, and other dependencies."
+      apt:
+        state: present
+        name:
+          - python3-apt
+          - python3-pycurl
+          - acl
+          - git
+          - curl
+          - unzip
+          - apache2
+          - php7.4-common
+          - php7.4-cli
+          - php7.4-dev
+          - php7.4-gd
+          - php7.4-curl
+          - php7.4-json
+          - php7.4-xml
+          - php7.4-mbstring
+          - php7.4-pdo
+          - php7.4-mysql
+          - php-apcu
+          - libpcre3-dev
+          - libapache2-mod-php7.4
+          - python3-mysqldb
+          - mysql-server
+
+#    - name: "Start Apache, MySQL, and PHP."
+#      service: "name={{ item }} state=started enabled=yes"
+#      with_items:
+#        - apache2
+#        - mysql
+
+    - name: Enable Apache rewrite module (required for Drupal).
+      apache2_module: name=rewrite state=present
+      notify: restart apache
+
+    - name: Add apache virtualhost allowoverride
+      replace:
+        path: /etc/apache2/apache2.conf
+        regexp: '(<Directory /var/www/>[^<]*)AllowOverride None'
+        replace: '\1AllowOverride All'
+      notify: restart apache 
+ 
+    - name: Create a MySQL database for Drupal.
+      mysql_db: "db=drupaldb state=present"
+
+    - name: Create a MySQL user for Drupal.
+      mysql_user:
+        name: "admin"
+        password: "12345"
+        priv: "drupaldb.*:ALL"
+        host: localhost
+        state: present
+
+    # TODO: See https://github.com/geerlingguy/ansible-for-devops/issues/297
+#    - name: Create a MySQL user for Drupal.
+#      mysql_user:
+#        name: "admin"
+#        password: "12345"
+#        priv: "drupaldb.*:ALL"
+#        host: localhost
+#        state: present
+
+    - name: Download Composer installer.
+      get_url:
+        url: https://getcomposer.org/installer
+        dest: /tmp/composer-installer.php
+        mode: 0755
+
+    - name: Run Composer installer.
+      command: >
+        php composer-installer.php
+        chdir=/tmp
+        creates=/usr/local/bin/composer
+
+    - name: Move Composer into globally-accessible location.
+      command: >
+        mv /tmp/composer.phar /usr/local/bin/composer
+        creates=/usr/local/bin/composer
+
+    - name: Permission Root Web.
+      file:
+        path: "/var/www/html"
+        mode: '0777'
+        state: directory
+    
+    #- name: Check if Drupal project already exists.
+    #  stat:
+    #    path: "/var/www/html/composer.json"
+    #  register: drupal_composer_json
+    
+    - name: Add drush to the Drupal site with Composer.
+      composer:
+        command: require
+        global_command: true
+        arguments: drush/drush:8.3.3
+      become_user: ubuntu
+
+    - name: Create drush symlink
+      file:
+        src: /home/ubuntu/.config/composer/vendor/bin/drush
+        dest: /usr/local/bin/drush
+        state: link
+
+    - name: Drupal Download
+      command: >
+        drush dl -y --destination=/var/www/html
+        --drupal-project-rename=drupal
+
+    - name: Install Drupal.
+      command: >
+        drush si -y --site-name="Website Drupal"
+        --account-name=admin
+        --account-pass=admin
+        --db-url=mysql://admin:12345@localhost/drupaldb
+        --root=/var/www/html/drupal
+        chdir=/var/www/html/drupal
+        creates=/var/www/html/drupal/sites/default/settings.php
+      notify: restart apache
+
+    - name: CSS Agregation
+      command: >
+        drush -y config-set system.performance css.preprocess 0
+        drush -y config-set system.performance js.preprocess 0
+        chdir=/var/www/html/drupal
